@@ -1,7 +1,13 @@
 const DEFAULT_CONFIG = {
   backendUrl: "http://127.0.0.1:8080",
-  apiKey: ""
+  apiKey: "",
+  collectorEnabled: false,
+  collectorRunning: false,
+  collectorLastError: ""
 };
+
+const COLLECTOR_ALARM = "browser-collector";
+let collectorPromise = null;
 
 async function getConfig() {
   return await chrome.storage.local.get(DEFAULT_CONFIG);
@@ -70,37 +76,189 @@ async function refreshSession(tabId, session) {
   return token;
 }
 
-async function syncSession() {
+async function findBrowserSession() {
   const tabs = await chrome.tabs.query({url: "https://www.noitu.fun/*"});
   for (const tab of tabs) {
     try {
       const session = await readSession(tab.id);
       if (!session?.accessToken) continue;
       const token = await refreshSession(tab.id, session);
-      const response = await backendFetch("/collector/token", {
-        method: "POST",
-        body: JSON.stringify({token})
-      });
-      if (response.ok) return;
+      if (token) return {tabId: tab.id, token};
     } catch {
-      // Retry on the next alarm when the browser tab or backend is available.
+      // Try the next open game tab.
     }
   }
+  return null;
+}
+
+async function syncSession() {
+  const session = await findBrowserSession();
+  if (!session) return null;
+  try {
+    const response = await backendFetch("/collector/token", {
+      method: "POST",
+      body: JSON.stringify({token: session.token})
+    });
+    if (!response.ok) return null;
+  } catch {
+    return null;
+  }
+  return session;
+}
+
+async function pageGameRequest(tabId, token, request) {
+  const result = await chrome.scripting.executeScript({
+    target: {tabId},
+    world: "MAIN",
+    args: [token, request],
+    func: async (accessToken, nextRequest) => {
+      try {
+        const response = await fetch(`https://api.noitu.fun/api/v1${nextRequest.path}`, {
+          method: nextRequest.method || "GET",
+          headers: {
+            Accept: "application/json",
+            Authorization: `Bearer ${accessToken}`,
+            ...(nextRequest.body ? {"Content-Type": "application/json"} : {})
+          },
+          body: nextRequest.body ? JSON.stringify(nextRequest.body) : undefined
+        });
+        const text = await response.text();
+        let data = null;
+        try { data = text ? JSON.parse(text) : null; } catch { data = {message: text}; }
+        return {status: response.status, data};
+      } catch (error) {
+        return {status: 0, data: {message: error.message}};
+      }
+    }
+  });
+  return result[0]?.result || {status: 0, data: {message: "browser request returned no result"}};
+}
+
+function normalize(value) {
+  return (value || "").normalize("NFC").toLowerCase().trim().replace(/\s+/g, " ");
+}
+
+function isPhrase(value) {
+  return /^\p{L}[\p{L}\p{M}'’-]*\s+\p{L}[\p{L}\p{M}'’-]*$/u.test(normalize(value));
+}
+
+function responseWord(data) {
+  return normalize(data?.word || data?.wordDescription?.word);
+}
+
+async function saveObservation(phrase, accepted) {
+  const result = await backendJSON("/observations", {
+    method: "POST",
+    body: JSON.stringify({phrase, accepted})
+  });
+  if (result.status !== 202) {
+    throw new Error(result.data?.message || `backend observation ${result.status}`);
+  }
+}
+
+function wait(milliseconds) {
+  return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
+async function collectBrowserGame() {
+  if (collectorPromise) return collectorPromise;
+  collectorPromise = (async () => {
+    const config = await getConfig();
+    if (!config.collectorEnabled) return {enabled: false, running: false};
+    await chrome.storage.local.set({collectorRunning: true, collectorLastError: ""});
+    try {
+      const session = await findBrowserSession();
+      if (!session) throw new Error("Không tìm thấy session đăng nhập trong tab noitu.fun");
+      const sessionId = crypto.randomUUID();
+      const init = await pageGameRequest(session.tabId, session.token, {
+        path: `/word-link/init?sessionId=${encodeURIComponent(sessionId)}`
+      });
+      if (init.status !== 200) throw new Error(`noitu.fun init HTTP ${init.status}`);
+      let current = responseWord(init.data);
+      if (!isPhrase(current)) throw new Error("noitu.fun init không trả về từ hai tiếng");
+      const used = [current];
+      await saveObservation(current, true);
+
+      for (let move = 0; move < 10; move += 1) {
+        const fields = current.split(" ");
+        const key = fields[fields.length - 1];
+        const suggestions = await backendJSON("/session/suggestions", {
+          method: "POST",
+          body: JSON.stringify({current_word: current, key, words: [], used})
+        });
+        if (suggestions.status !== 200) throw new Error(suggestions.data?.message || `backend suggestions ${suggestions.status}`);
+        const candidate = suggestions.data?.suggestions?.find(item => isPhrase(item.word) && !used.includes(normalize(item.word)))?.word;
+        if (!candidate) break;
+        await wait(3000);
+        const answer = await pageGameRequest(session.tabId, session.token, {
+          path: "/word-link/answer",
+          method: "POST",
+          body: {answer: normalize(candidate), sessionId}
+        });
+        if (answer.status !== 200) throw new Error(`noitu.fun answer HTTP ${answer.status}`);
+        if (!answer.data?.isSuccessful) {
+          await saveObservation(candidate, false);
+          break;
+        }
+        await saveObservation(candidate, true);
+        used.push(normalize(candidate));
+        if (answer.data.isFinished) break;
+        current = responseWord(answer.data);
+        if (!isPhrase(current)) break;
+        await saveObservation(current, true);
+        used.push(current);
+      }
+      await chrome.storage.local.set({collectorRunning: false, collectorLastError: ""});
+      return {enabled: true, running: false};
+    } catch (error) {
+      const message = error?.message || "browser collector failed";
+      await chrome.storage.local.set({collectorRunning: false, collectorLastError: message});
+      return {enabled: true, running: false, last_error: message};
+    } finally {
+      collectorPromise = null;
+    }
+  })();
+  return collectorPromise;
+}
+
+async function collectorStatus() {
+  const config = await getConfig();
+  return {
+    enabled: !!config.collectorEnabled,
+    running: !!config.collectorRunning,
+    last_error: config.collectorLastError || ""
+  };
+}
+
+async function setCollector(enabled) {
+  await chrome.storage.local.set({collectorEnabled: enabled, collectorLastError: ""});
+  if (!enabled) {
+    await chrome.alarms.clear(COLLECTOR_ALARM);
+    await chrome.storage.local.set({collectorRunning: false});
+    return collectorStatus();
+  }
+  return collectorStatus();
 }
 
 async function handleMessage(message) {
   if (message.type === "getConfig") return await getConfig();
-  if (message.type === "syncSession") {
-    await syncSession();
-    return {ok: true};
-  }
+  if (message.type === "syncSession") return {ok: !!(await syncSession())};
   if (message.type === "suggest") {
     return await backendJSON("/session/suggestions", {method: "POST", body: JSON.stringify(message.payload)});
   }
-  if (message.type === "getSettings") return await backendJSON("/settings");
-  if (message.type === "toggleCollector") {
-    return await backendJSON("/collector/toggle", {method: "POST", body: JSON.stringify({enabled: !!message.enabled})});
+  if (message.type === "collectorBackend") {
+    const options = {method: message.options?.method || "GET"};
+    if (message.options?.body !== undefined && message.options?.body !== null) {
+      options.body = message.options.body;
+    }
+    return await backendJSON(message.path, options);
   }
+  if (message.type === "getSettings") {
+    const result = await backendJSON("/settings");
+    if (result.status >= 200 && result.status < 300) result.data.collector = await collectorStatus();
+    return result;
+  }
+  if (message.type === "toggleCollector") return {status: 200, data: await setCollector(!!message.enabled)};
   if (message.type === "toggleSuggestions") {
     return await backendJSON("/settings/suggestions", {method: "POST", body: JSON.stringify({enabled: !!message.enabled})});
   }
@@ -122,5 +280,7 @@ chrome.alarms.onAlarm.addListener(alarm => {
 chrome.tabs.onUpdated.addListener((id, info, tab) => {
   if (info.status === "complete" && tab.url?.startsWith("https://www.noitu.fun/")) syncSession();
 });
-chrome.runtime.onStartup.addListener(syncSession);
+chrome.runtime.onStartup.addListener(async () => {
+  syncSession();
+});
 chrome.runtime.onInstalled.addListener(syncSession);

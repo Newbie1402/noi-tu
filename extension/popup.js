@@ -13,15 +13,24 @@ async function message(payload) {
   return await chrome.runtime.sendMessage(payload);
 }
 
+async function localCollectorState() {
+  return await chrome.storage.local.get({collectorEnabled: false, collectorRunning: false, collectorLastError: ""});
+}
+
 async function refresh() {
   const result = await message({type: "getSettings"});
   if (!result || result.status < 200 || result.status >= 300) {
     show(result?.data?.message || "Không kết nối được backend", true);
     return;
   }
+  result.data.collector = await localCollectorState();
   suggestions.checked = !!result.data.suggestions_enabled;
-  collector.checked = !!result.data.collector?.running;
-  show(`Gợi ý: ${suggestions.checked ? "bật" : "tắt"}\nCron: ${collector.checked ? "đang chạy" : "đã tắt"}`);
+  collector.checked = !!result.data.collector?.enabled;
+  const error = result.data.collector?.last_error;
+  show(error
+    ? `Gợi ý: ${suggestions.checked ? "bật" : "tắt"}\nCron lỗi: ${error}`
+    : `Gợi ý: ${suggestions.checked ? "bật" : "tắt"}\nCron: ${collector.checked ? (result.data.collector?.running ? "đang cào" : "đã bật") : "đã tắt"}`,
+    !!error);
 }
 
 async function requestBackendPermission(value) {
@@ -33,11 +42,12 @@ async function requestBackendPermission(value) {
 
 document.getElementById("save").addEventListener("click", async () => {
   try {
+    const shouldCollect = collector.checked;
     const value = backend.value.trim().replace(/\/+$/, "");
     const parsed = new URL(value);
     if (!/^https?:$/.test(parsed.protocol)) throw new Error("Backend phải dùng http hoặc https");
     if (!await requestBackendPermission(value)) throw new Error("Chưa cấp quyền gọi backend");
-    await chrome.storage.local.set({backendUrl: value, apiKey: apiKey.value.trim()});
+    await chrome.storage.local.set({backendUrl: value, apiKey: apiKey.value.trim(), collectorEnabled: shouldCollect, collectorLastError: ""});
     show("Đã lưu cấu hình");
     await refresh();
   } catch (error) {
@@ -52,11 +62,8 @@ suggestions.addEventListener("change", async () => {
 });
 
 collector.addEventListener("change", async () => {
-  const result = await message({type: "toggleCollector", enabled: collector.checked});
-  if (result?.status !== 200) {
-    collector.checked = !collector.checked;
-    show(result?.data?.last_error || result?.data?.message || "Không đổi được trạng thái cron", true);
-  } else await refresh();
+  await chrome.storage.local.set({collectorEnabled: collector.checked, collectorLastError: ""});
+  await refresh();
 });
 
 (async () => {
