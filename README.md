@@ -34,6 +34,8 @@ Alternatively, install the unpacked `extension` folder through Chrome's Extensio
 
 The same extension watches the current word in both solo and online game tabs. It sends normalized game words through the background service worker to `POST /session/suggestions` on the configured backend and shows ranked suggestions in a small panel. The backend records those words as accepted observations asynchronously. API keys are never sent through the page DOM; the service worker adds them to backend requests.
 
+The collector is browser-driven: keep one authenticated `noitu.fun` tab open, enable `Chạy cron tự cào` in the popup, and the content script runs a browser-context game session every minute. Game API calls stay in the `noitu.fun` page context (so the site's browser access rules apply); only accepted/rejected observations cross to the VPS through the extension service worker. `Cào ngay` starts one batch immediately. The VPS-side collector remains available for direct API clients but is not used by the extension because the site rejects server-originated requests.
+
 ## Docker Swarm deployment
 
 The repository includes a small VPS poller because the existing `:18081` deploy-agent runs standalone containers, not Swarm services. The poller checks public `main` every 60 seconds, builds `deployments/Dockerfile`, creates Docker secrets once, and runs `docker stack deploy`. Therefore a push to merged `main` automatically rolls the Swarm service without exposing Docker or the deploy-agent API to GitHub.
