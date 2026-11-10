@@ -15,7 +15,7 @@ services:
       - noitu_database_url
     ports:
       - target: 8080
-        published: ${NOITU_PORT:-8080}
+        published: ${NOITU_PORT:-18083}
         protocol: tcp
         mode: ingress
     deploy:

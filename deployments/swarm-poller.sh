@@ -12,6 +12,7 @@ STACK_NAME=${STACK_NAME:-noitu}
 IMAGE=${IMAGE:-noitu:latest}
 POLL_SECONDS=${POLL_SECONDS:-60}
 export NOITU_DATABASE_URL NOITU_API_KEY STACK_NAME IMAGE
+export NOITU_PORT=${NOITU_PORT:-18083}
 
 mkdir -p "$(dirname "$SOURCE_DIR")" "$(dirname "$STATE_FILE")"
 
