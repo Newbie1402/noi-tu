@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Nối từ - kết nối phiên khách",
+  "version": "1.1.0",
+  "description": "Đọc phiên Nối Từ, gửi token an toàn tới backend và điều khiển gợi ý/cron.",
+  "permissions": ["tabs", "scripting", "alarms", "storage"],
+  "host_permissions": ["https://www.noitu.fun/*", "https://api.noitu.fun/*", "http://127.0.0.1:8080/*", "http://127.0.0.1:8090/*"],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "action": {"default_title": "Nối từ Helper", "default_popup": "popup.html"},
+  "background": {"service_worker": "background.js"},
+  "content_scripts": [{"matches": ["https://www.noitu.fun/mot-minh", "https://www.noitu.fun/online/*"], "js": ["content.js"], "run_at": "document_idle"}]
+}

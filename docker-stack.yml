@@ -1,0 +1,43 @@
+version: "3.9"
+
+services:
+  api:
+    image: ${NOITU_IMAGE:-noitu:latest}
+    environment:
+      ADDR: ":8080"
+      API_KEY_FILE: /run/secrets/noitu_api_key
+      DATABASE_URL_FILE: /run/secrets/noitu_database_url
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-https://www.noitu.fun}
+      COLLECT_INTERVAL_MINUTES: ${COLLECT_INTERVAL_MINUTES:-30}
+      COLLECT_AUTOSTART: ${COLLECT_AUTOSTART:-0}
+    secrets:
+      - noitu_api_key
+      - noitu_database_url
+    ports:
+      - target: 8080
+        published: ${NOITU_PORT:-8080}
+        protocol: tcp
+        mode: ingress
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+        window: 60s
+      update_config:
+        parallelism: 1
+        order: start-first
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+        order: stop-first
+    read_only: true
+    tmpfs:
+      - /tmp
+
+secrets:
+  noitu_api_key:
+    external: true
+  noitu_database_url:
+    external: true

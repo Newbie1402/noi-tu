@@ -1,0 +1,8 @@
+.git
+.env
+.env.*
+*.test
+extension
+README.md
+Dockerfile
+docker-stack.yml
