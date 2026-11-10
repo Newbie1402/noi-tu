@@ -1,9 +1,11 @@
-package main
+package app
 
 import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"noitu/internal/config"
 )
 
 func TestLoadDotEnvPreservesExistingEnvironment(t *testing.T) {
@@ -13,7 +15,7 @@ func TestLoadDotEnvPreservesExistingEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("TEST_DOTENV_EXISTING", "from-environment")
-	loadDotEnv(path)
+	config.LoadDotEnv(path)
 	if got := os.Getenv("TEST_DOTENV_QUOTED"); got != "hello world" {
 		t.Fatalf("quoted value: %q", got)
 	}

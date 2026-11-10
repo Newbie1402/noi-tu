@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -155,7 +155,7 @@ func TestInitializeSchema(t *testing.T) {
 		t.Log("table already exists; preserving existing schema")
 		return
 	}
-	schema, err := os.ReadFile("schema.sql")
+	schema, err := os.ReadFile("../../migrations/000001_init.up.sql")
 	if err != nil {
 		t.Fatal(err)
 	}

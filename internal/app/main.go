@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -11,24 +11,18 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
 	"golang.org/x/text/unicode/norm"
+	"noitu/internal/config"
+	"noitu/internal/domain"
+	"noitu/internal/infrastructure/database"
 )
 
-type observation struct {
-	Phrase   string `json:"phrase"`
-	Accepted *bool  `json:"accepted"`
-}
-type suggestion struct {
-	Word     string `json:"word"`
-	Verified bool   `json:"verified"`
-}
+type observation = domain.Observation
+type suggestion = domain.Suggestion
 type server struct {
 	db                   *sql.DB
 	client               *http.Client
@@ -39,18 +33,14 @@ type server struct {
 	tokenStore           *tokenBridge
 	collectorInterval    time.Duration
 	collectorConfigError string
+	staticToken          string
 	apiKey               string
 	requireAPIKey        bool
 	allowedOrigins       map[string]bool
 	settings             *runtimeSettings
 }
 
-type sessionState struct {
-	CurrentWord string   `json:"current_word"`
-	Key         string   `json:"key"`
-	Used        []string `json:"used"`
-	Words       []string `json:"words"`
-}
+type sessionState = domain.SessionState
 
 type sessionSuggestionResponse struct {
 	CurrentWord string       `json:"current_word"`
@@ -289,7 +279,7 @@ func (s *server) suggest(w http.ResponseWriter, r *http.Request) {
 	for phrase, accepted := range observed {
 		first, valid := parts(phrase)
 		if accepted && valid && first == key && !used[phrase] {
-			if emit(w, "suggestion", suggestion{phrase, true}) != nil {
+			if emit(w, "suggestion", suggestion{Word: phrase, Verified: true}) != nil {
 				return
 			}
 		}
@@ -307,7 +297,7 @@ func (s *server) suggest(w http.ResponseWriter, r *http.Request) {
 		if item.Verified {
 			continue
 		}
-		if emit(w, "suggestion", suggestion{item.Word, false}) != nil {
+		if emit(w, "suggestion", suggestion{Word: item.Word, Verified: false}) != nil {
 			return
 		}
 	}
@@ -355,82 +345,18 @@ func (s *server) worker() {
 	}
 }
 
-func collectorIntervalFromEnv() (time.Duration, error) {
-	value := os.Getenv("COLLECT_INTERVAL_MINUTES")
-	if value == "" {
-		return 30 * time.Minute, nil
-	}
-	minutes, err := strconv.Atoi(value)
-	if err != nil || minutes < 30 || minutes > 10080 {
-		return 0, fmt.Errorf("COLLECT_INTERVAL_MINUTES must be between 30 and 10080")
-	}
-	return time.Duration(minutes) * time.Minute, nil
-}
-
-func configValue(valueName, fileName string) string {
-	if value := strings.TrimSpace(os.Getenv(valueName)); value != "" {
-		return value
-	}
-	if path := strings.TrimSpace(os.Getenv(fileName)); path != "" {
-		if data, err := os.ReadFile(path); err == nil {
-			return strings.TrimSpace(string(data))
-		}
-	}
-	return ""
-}
-
-func parseAllowedOrigins(value string) map[string]bool {
-	result := map[string]bool{}
-	for _, origin := range strings.Split(value, ",") {
-		if origin = strings.TrimSpace(origin); origin != "" {
-			result[origin] = true
-		}
-	}
-	return result
-}
-
-func publicBind(addr string) bool {
-	host, _, err := net.SplitHostPort(addr)
+func Run() {
+	cfg, err := config.Load(".env")
 	if err != nil {
-		return true
+		log.Fatal(err)
 	}
-	return host == "" || host == "0.0.0.0" || host == "::"
-}
-
-func loadDotEnv(path string) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(strings.TrimPrefix(key, "export "))
-		value = strings.TrimSpace(value)
-		if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
-			value = value[1 : len(value)-1]
-		}
-		if key != "" {
-			if _, exists := os.LookupEnv(key); !exists {
-				_ = os.Setenv(key, value)
-			}
-		}
-	}
-}
-
-func main() {
-	loadDotEnv(".env")
-	dsn := configValue("DATABASE_URL", "DATABASE_URL_FILE")
+	dsn := cfg.DatabaseURL
 	if dsn == "" {
 		log.Fatal("DATABASE_URL is required")
 	}
-	db, err := sql.Open("pgx", dsn)
+	dbContext, cancelDB := context.WithTimeout(context.Background(), 5*time.Second)
+	db, err := database.Open(dbContext, dsn)
+	cancelDB()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -445,41 +371,11 @@ func main() {
 		log.Fatal(err)
 	}
 	defer db.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	err = db.PingContext(ctx)
-	cancel()
-	if err != nil {
-		log.Fatal(err)
-	}
-	addr := os.Getenv("ADDR")
-	if addr == "" {
-		addr = "127.0.0.1:8080"
-	}
-	apiKey := configValue("API_KEY", "API_KEY_FILE")
-	if publicBind(addr) && apiKey == "" {
-		log.Fatal("API_KEY or API_KEY_FILE is required when ADDR is publicly bound")
-	}
-	requireAPIKey := apiKey != "" || os.Getenv("REQUIRE_API_KEY") == "1"
-	allowedOrigins := parseAllowedOrigins(os.Getenv("ALLOWED_ORIGINS"))
-	if len(allowedOrigins) == 0 {
-		allowedOrigins["https://www.noitu.fun"] = true
-	}
-	interval, intervalErr := collectorIntervalFromEnv()
-	if intervalErr != nil {
-		log.Printf("collector disabled: %v", intervalErr)
-		interval = 30 * time.Minute
-	}
-	if os.Getenv("COLLECT_ONCE") == "1" {
-		interval = 0
-	}
 	tokenStore := &tokenBridge{ready: make(chan struct{})}
 	runtimeSettings := newRuntimeSettings()
 	runtimeSettings.suggestions.Store(suggestionsEnabled)
-	s := &server{db: db, client: &http.Client{Timeout: 15 * time.Second}, queue: make(chan observation, 256), collector: &collectorManager{}, tokenStore: tokenStore, collectorInterval: interval, apiKey: apiKey, requireAPIKey: requireAPIKey, allowedOrigins: allowedOrigins, settings: runtimeSettings}
-	if intervalErr != nil {
-		s.collectorConfigError = intervalErr.Error()
-	}
-	if os.Getenv("COLLECT_BROWSER") == "1" {
+	s := &server{db: db, client: &http.Client{Timeout: 15 * time.Second}, queue: make(chan observation, 256), collector: &collectorManager{}, tokenStore: tokenStore, collectorInterval: cfg.CollectorInterval, apiKey: cfg.APIKey, requireAPIKey: cfg.RequireAPIKey, allowedOrigins: cfg.AllowedOrigins, settings: runtimeSettings, staticToken: cfg.StaticToken}
+	if cfg.CollectorBrowser {
 		listener := &http.Server{Addr: "127.0.0.1:8090", Handler: http.HandlerFunc(tokenStore.serve), ReadHeaderTimeout: 5 * time.Second}
 		socket, err := net.Listen("tcp", listener.Addr)
 		if err != nil {
@@ -493,8 +389,8 @@ func main() {
 			log.Print("browser collector bridge listening on 127.0.0.1:8090")
 		}
 	}
-	autoStart := os.Getenv("COLLECT_AUTOSTART") == "1" || os.Getenv("COLLECT_ONCE") == "1"
-	if intervalErr == nil && (autoStart || collectorEnabled) {
+	autoStart := cfg.CollectorAutostart || cfg.CollectorOnce
+	if autoStart || collectorEnabled {
 		s.collector.set(true, s.runCollector)
 	}
 	go s.worker()
@@ -513,8 +409,8 @@ func main() {
 	mux.HandleFunc("GET /openapi.json", openAPIHandler)
 	mux.HandleFunc("GET /swagger", swaggerUIHandler)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	log.Printf("listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	log.Printf("listening on %s", cfg.Address)
+	if err := http.ListenAndServe(cfg.Address, mux); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 }

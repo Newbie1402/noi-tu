@@ -25,6 +25,13 @@ services:
         delay: 5s
         max_attempts: 5
         window: 60s
+      resources:
+        limits:
+          cpus: ${CPU_LIMIT:-1.0}
+          memory: ${MEMORY_LIMIT:-512M}
+        reservations:
+          cpus: ${CPU_RESERVATION:-0.25}
+          memory: ${MEMORY_RESERVATION:-128M}
       update_config:
         parallelism: 1
         order: start-first

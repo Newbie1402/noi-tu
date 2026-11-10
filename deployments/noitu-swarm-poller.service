@@ -1,0 +1,17 @@
+[Unit]
+Description=Nối Từ Swarm main branch deploy poller
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent-temp
+EnvironmentFile=/etc/noitu/deploy.env
+ExecStart=/usr/local/bin/noitu-swarm-poller
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
