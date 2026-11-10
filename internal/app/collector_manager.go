@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -103,7 +102,7 @@ func (s *server) collectorToggle(w http.ResponseWriter, r *http.Request) {
 		writeCollectorError(w, http.StatusServiceUnavailable, s.collectorConfigError)
 		return
 	}
-	if *request.Enabled && os.Getenv("NOITU_ACCESS_TOKEN") == "" && os.Getenv("COLLECT_BROWSER") != "1" && (s.tokenStore == nil || s.tokenStore.get() == "") {
+	if *request.Enabled && s.staticToken == "" && (s.tokenStore == nil || s.tokenStore.get() == "") {
 		writeCollectorError(w, http.StatusServiceUnavailable, "NOITU_ACCESS_TOKEN is required, or start with COLLECT_BROWSER=1")
 		return
 	}
@@ -153,7 +152,7 @@ func (s *server) collectorToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) runCollector(ctx context.Context) error {
-	token := os.Getenv("NOITU_ACCESS_TOKEN")
+	token := s.staticToken
 	if s.tokenStore != nil {
 		if token == "" {
 			select {
