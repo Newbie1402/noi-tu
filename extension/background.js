@@ -170,12 +170,12 @@ async function collectBrowserGame() {
       const session = await findBrowserSession();
       if (!session) throw new Error("Không tìm thấy session đăng nhập trong tab noitu.fun");
       const sessionId = crypto.randomUUID();
-      const init = await pageGameRequest(session.tabId, session.token, {
-        path: `/word-link/init?sessionId=${encodeURIComponent(sessionId)}`
+      const start = await pageGameRequest(session.tabId, session.token, {
+        path: `/word-link/start?sessionId=${encodeURIComponent(sessionId)}`
       });
-      if (init.status !== 200) throw new Error(`noitu.fun init HTTP ${init.status}`);
-      let current = responseWord(init.data);
-      if (!isPhrase(current)) throw new Error("noitu.fun init không trả về từ hai tiếng");
+      if (start.status !== 200) throw new Error(start.data?.message || `noitu.fun start HTTP ${start.status}`);
+      let current = responseWord(start.data);
+      if (!isPhrase(current)) throw new Error("noitu.fun start không trả về từ hai tiếng");
       const used = [current];
       await saveObservation(current, true);
 
@@ -275,12 +275,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.alarms.create("sync-session", {periodInMinutes: 1});
 chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === "sync-session") syncSession();
+  if (alarm.name === "sync-session") syncSession().catch(() => {});
 });
 chrome.tabs.onUpdated.addListener((id, info, tab) => {
-  if (info.status === "complete" && tab.url?.startsWith("https://www.noitu.fun/")) syncSession();
+  if (info.status === "complete" && tab.url?.startsWith("https://www.noitu.fun/")) syncSession().catch(() => {});
 });
 chrome.runtime.onStartup.addListener(async () => {
-  syncSession();
+  await syncSession().catch(() => {});
 });
-chrome.runtime.onInstalled.addListener(syncSession);
+chrome.runtime.onInstalled.addListener(() => syncSession().catch(() => {}));

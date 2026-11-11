@@ -16,7 +16,7 @@ func TestCollectGameStopsOnRejectedAnswer(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer test" {
 			t.Error("missing authorization")
 		}
-		if r.URL.Path == "/word-link/init" {
+		if r.URL.Path == "/word-link/start" {
 			w.Write([]byte(`{"word":"bắt nạt"}`))
 			return
 		}
@@ -56,7 +56,7 @@ func TestCollectorScheduleRepeatsAndStops(t *testing.T) {
 }
 func TestCollectGameRequiresExplicitSuccess(t *testing.T) {
 	u := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/word-link/init" {
+		if r.URL.Path == "/word-link/start" {
 			w.Write([]byte(`{"word":"a b"}`))
 		} else {
 			w.Write([]byte(`{}`))

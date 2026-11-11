@@ -54,8 +54,13 @@
     collectButton.textContent = "Cào ngay";
     collectButton.style.cssText = "border:1px solid #7cf5c5;border-radius:8px;background:#164b43;color:#fff;padding:5px 9px;cursor:pointer";
     collectButton.addEventListener("click", async () => {
-      await chrome.storage.local.set({collectorEnabled: true, collectorLastError: ""});
-      await collectBrowserGame();
+      try {
+        await chrome.storage.local.set({collectorEnabled: true, collectorLastError: ""});
+        await collectBrowserGame();
+      } catch (error) {
+        const statusNode = document.getElementById("noitu-collector-status");
+        if (statusNode) statusNode.textContent = `Cron lỗi: ${error?.message || "extension context unavailable"}`;
+      }
     });
     controls.appendChild(collectButton);
     const collectorStatus = document.createElement("small");
@@ -63,7 +68,7 @@
     collectorStatus.style.cssText = "display:block;margin-top:6px;color:#b7e8d6";
     controls.appendChild(collectorStatus);
     node.appendChild(controls);
-    updateCollectorStatus();
+    updateCollectorStatus().catch(() => {});
   }
 
   async function updateCollectorStatus() {
@@ -88,10 +93,11 @@
     lastSignature = signature;
     requestInFlight = true;
     try {
-      const response = await chrome.runtime.sendMessage({
+      const response = await runtimeMessage({
         type: "suggest",
         payload: {current_word: word, key, words: [word], used: [...seen]}
       });
+      if (response === null) return;
       if (response?.status === 204) {
         hidePanel();
         return;
@@ -108,19 +114,34 @@
     }
   }
 
+  async function runtimeMessage(payload) {
+    try {
+      return await chrome.runtime.sendMessage(payload);
+    } catch (error) {
+      if (/Extension context invalidated|Receiving end does not exist/i.test(error?.message || "")) return null;
+      throw error;
+    }
+  }
+
   let browserCollectorPromise = null;
   const collectorDefaults = {backendUrl: "http://127.0.0.1:8080", apiKey: "", collectorEnabled: false};
 
   async function collectorConfig() {
-    return await chrome.storage.local.get(collectorDefaults);
+    try {
+      return await chrome.storage.local.get(collectorDefaults);
+    } catch {
+      return collectorDefaults;
+    }
   }
 
   async function collectorBackendJSON(path, options = {}) {
-    return await withTimeout(chrome.runtime.sendMessage({
+    const response = await withTimeout(runtimeMessage({
       type: "collectorBackend",
       path,
       options: {method: options.method || "GET", body: options.body}
     }), 15000, `backend ${path} timeout`);
+    if (response === null) throw new Error("extension context invalidated; reload the tab");
+    return response;
   }
 
   function withTimeout(promise, milliseconds, message) {
@@ -163,7 +184,10 @@
 
   async function browserGameRequest(token, request) {
     const controller = new AbortController();
-    const response = await withTimeout(fetch(`https://api.noitu.fun/api/v1${request.path}`, {
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    let response;
+    try {
+      response = await fetch(`https://api.noitu.fun/api/v1${request.path}`, {
       method: request.method || "GET",
       headers: {
         Accept: "application/json",
@@ -172,7 +196,13 @@
       },
       body: request.body ? JSON.stringify(request.body) : undefined,
       signal: controller.signal
-    }), 15000, `noitu.fun ${request.path} timeout`).finally(() => controller.abort());
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") throw new Error(`noitu.fun ${request.path} timeout`);
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
     const text = await response.text();
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch { data = {message: text}; }
@@ -195,56 +225,69 @@
     return new Promise(resolve => setTimeout(resolve, milliseconds));
   }
 
+  async function collectOneBrowserGame(token) {
+    const sessionId = crypto.randomUUID();
+    const start = await browserGameRequest(token, {path: `/word-link/start?sessionId=${encodeURIComponent(sessionId)}`});
+    if (start.status !== 200) throw new Error(start.data?.message || `noitu.fun start HTTP ${start.status}`);
+    let current = browserResponseWord(start.data);
+    if (!twoSyllable(current)) throw new Error("noitu.fun start không trả về từ hai tiếng");
+    const used = [current];
+    await saveBrowserObservation(current, true);
+    let moves = 0;
+
+    for (let move = 0; move < 10; move += 1) {
+      const latest = await collectorConfig();
+      if (!latest.collectorEnabled) break;
+      const key = current.split(" ").at(-1);
+      const suggestions = await collectorBackendJSON("/session/suggestions", {
+        method: "POST",
+        body: JSON.stringify({current_word: current, key, words: [], used})
+      });
+      if (suggestions.status !== 200) throw new Error(suggestions.data?.message || `backend suggestions ${suggestions.status}`);
+      const candidate = suggestions.data?.suggestions?.find(item => twoSyllable(item.word) && !used.includes(normalize(item.word)))?.word;
+      if (!candidate) break;
+      await collectorWait(3000);
+      const answer = await browserGameRequest(token, {
+        path: "/word-link/answer",
+        method: "POST",
+        body: {answer: normalize(candidate), sessionId}
+      });
+      if (answer.status !== 200) throw new Error(`noitu.fun answer HTTP ${answer.status}`);
+      if (!answer.data?.isSuccessful) {
+        await saveBrowserObservation(candidate, false);
+        break;
+      }
+      moves += 1;
+      await saveBrowserObservation(candidate, true);
+      used.push(normalize(candidate));
+      if (answer.data.isFinished) break;
+      current = browserResponseWord(answer.data);
+      if (!twoSyllable(current)) break;
+      await saveBrowserObservation(current, true);
+      used.push(current);
+    }
+    return moves;
+  }
+
   async function collectBrowserGame() {
     if (browserCollectorPromise) return browserCollectorPromise;
     browserCollectorPromise = (async () => {
-      const config = await collectorConfig();
-      if (!config.collectorEnabled) return;
-      await chrome.storage.local.set({collectorRunning: true, collectorLastError: ""});
       try {
+        const config = await collectorConfig();
+        if (!config.collectorEnabled) return;
+        await chrome.storage.local.set({collectorRunning: true, collectorLastError: ""});
         const token = await browserToken();
         if (!token) throw new Error("Không tìm thấy access token trong tab noitu.fun");
-        const sessionId = crypto.randomUUID();
-        const init = await browserGameRequest(token, {path: `/word-link/init?sessionId=${encodeURIComponent(sessionId)}`});
-        if (init.status !== 200) throw new Error(`noitu.fun init HTTP ${init.status}`);
-        let current = browserResponseWord(init.data);
-        if (!twoSyllable(current)) throw new Error("noitu.fun init không trả về từ hai tiếng");
-        const used = [current];
-        await saveBrowserObservation(current, true);
-
-        for (let move = 0; move < 10; move += 1) {
-          const latest = await collectorConfig();
-          if (!latest.collectorEnabled) break;
-          const key = current.split(" ").at(-1);
-          const suggestions = await collectorBackendJSON("/session/suggestions", {
-            method: "POST",
-            body: JSON.stringify({current_word: current, key, words: [], used})
-          });
-          if (suggestions.status !== 200) throw new Error(suggestions.data?.message || `backend suggestions ${suggestions.status}`);
-          const candidate = suggestions.data?.suggestions?.find(item => twoSyllable(item.word) && !used.includes(normalize(item.word)))?.word;
-          if (!candidate) break;
-          await collectorWait(3000);
-          const answer = await browserGameRequest(token, {
-            path: "/word-link/answer",
-            method: "POST",
-            body: {answer: normalize(candidate), sessionId}
-          });
-          if (answer.status !== 200) throw new Error(`noitu.fun answer HTTP ${answer.status}`);
-          if (!answer.data?.isSuccessful) {
-            await saveBrowserObservation(candidate, false);
-            break;
-          }
-          await saveBrowserObservation(candidate, true);
-          used.push(normalize(candidate));
-          if (answer.data.isFinished) break;
-          current = browserResponseWord(answer.data);
-          if (!twoSyllable(current)) break;
-          await saveBrowserObservation(current, true);
-          used.push(current);
+        let totalMoves = 0;
+        for (let attempt = 0; attempt < 5 && totalMoves < 10; attempt += 1) {
+          totalMoves += await collectOneBrowserGame(token);
+          if (totalMoves < 10) await collectorWait(500);
         }
         await chrome.storage.local.set({collectorRunning: false, collectorLastError: ""});
       } catch (error) {
-        await chrome.storage.local.set({collectorRunning: false, collectorLastError: error?.message || "browser collector failed"});
+        try {
+          await chrome.storage.local.set({collectorRunning: false, collectorLastError: error?.message || "browser collector failed"});
+        } catch {}
       } finally {
         browserCollectorPromise = null;
       }
@@ -254,14 +297,14 @@
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local") {
-      if (changes.collectorEnabled?.newValue) collectBrowserGame();
-      updateCollectorStatus();
+      if (changes.collectorEnabled?.newValue) collectBrowserGame().catch(() => {});
+      updateCollectorStatus().catch(() => {});
     }
   });
-  setInterval(collectBrowserGame, 60000);
-  setTimeout(collectBrowserGame, 1500);
+  setInterval(() => collectBrowserGame().catch(() => {}), 60000);
+  setTimeout(() => collectBrowserGame().catch(() => {}), 1500);
 
-  new MutationObserver(() => sync()).observe(document.documentElement, {subtree: true, childList: true, characterData: true});
-  setInterval(sync, 1000);
-  sync();
+  new MutationObserver(() => sync().catch(() => {})).observe(document.documentElement, {subtree: true, childList: true, characterData: true});
+  setInterval(() => sync().catch(() => {}), 1000);
+  sync().catch(() => {});
 })();
