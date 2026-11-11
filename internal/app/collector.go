@@ -72,7 +72,7 @@ func gameRequest(ctx context.Context, client *http.Client, method, endpoint, tok
 }
 
 func collectGame(ctx context.Context, client *http.Client, base, token, session string, index map[string][]string, maxMoves int, delay time.Duration, save func(context.Context, string) error) error {
-	state, err := gameRequest(ctx, client, "GET", base+"/word-link/init?sessionId="+url.QueryEscape(session), token, nil)
+	state, err := gameRequest(ctx, client, "GET", base+"/word-link/start?sessionId="+url.QueryEscape(session), token, nil)
 	if err != nil {
 		return err
 	}
